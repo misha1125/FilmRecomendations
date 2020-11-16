@@ -7,58 +7,58 @@ import time
 from scipy.stats import ortho_group
 
 
-def svp_solve(A, mask, delta=None, epsilon=1e-4, max_iterations=300, k=10):
+def svp_solve(M, mask, A=None, B=None, tao=None, delta=None, epsilon=1e-4, max_iterations=300, r=10):
     global df
     if delta is None:
-        delta = max(0.75 / density, 1)
+        delta = max(0.75 / density / 4, 1)
     print("svp_delta", delta)
-    X = np.zeros_like(A)  # инициализируем X = 0
+    X = np.zeros_like(M)  # инициализируем X = 0
     t = 0
-    fn_pr = np.linalg.norm(mask * A, ord='fro')
+    fn_pr = np.linalg.norm(mask * M, ord='fro')
     for t in range(max_iterations):  # ограничиваем возможно количество итераций,
         # так как в некоторых случаях оно может быть очень большим
-        Y = X - delta * mask * (X - A)  # вычисляем матрицу Y
+        Y = X - delta * mask * (X - M)  # вычисляем матрицу Y
         U, S, V = np.linalg.svd(Y, full_matrices=False)  # сингулярное разложение
         # матрицы Y
-        S[k:] = 0  # берем только первые k сингулярных значений
+        S[r:] = 0  # берем только первые k сингулярных значений
         X = np.linalg.multi_dot([U, np.diag(S), V])  # перемножаем U*S*V^T
         it = df.shape[0]
-        df.loc[it] = [t, 'known_svp', np.linalg.norm(mask * (X - A), ord='fro') / fn_pr]
-        df.loc[it + 1] = [t, 'all_svp', np.linalg.norm(X - A, ord='fro') / fn_pr]
+        df.loc[it] = [t, 'known_svp', np.linalg.norm(mask * (X - M), ord='fro') / fn_pr]
+        df.loc[it + 1] = [t, 'all_svp', np.linalg.norm(X - M, ord='fro') / fn_pr]
 
-        if np.linalg.norm(mask * (A - X), ord='fro') / fn_pr < epsilon:
+        if np.linalg.norm(mask * (M - X), ord='fro') / fn_pr < epsilon:
             break
-    return X, t
+    return X, t, t
 
 
-def svt_solve(A, mask, tao, delta=None, epsilon=1e-2, max_iterations=300):
+def svt_solve(M, mask, tao, A=None, B=None, r=None, delta=None, epsilon=1e-2, max_iterations=300):
     global df
     if delta is None:
         delta = 1.2 / density
     print("svt_delta: ", delta)
-    k_0 = int(np.ceil(tao / (delta * np.linalg.norm(mask * A, ord=2))))
+    k_0 = int(np.ceil(tao / (delta * np.linalg.norm(mask * M, ord=2))))
     print("k_0: ", k_0)
-    Y = k_0 * delta * mask * A
+    Y = k_0 * delta * mask * M
 
-    fn_pr = np.linalg.norm(mask * A, ord='fro')
+    fn_pr = np.linalg.norm(mask * M, ord='fro')
     t = 0
     for t in range(max_iterations):
         U, E, V = np.linalg.svd(Y)
         E_tao = np.maximum((E - tao), 0)
         X = np.linalg.multi_dot([U, np.diag(E_tao), V])
-        Y = Y + delta * mask * (A - X)
+        Y = Y + delta * mask * (M - X)
 
         k = df.shape[0]
-        df.loc[k] = [t, 'known_svt', np.linalg.norm(mask * (X - A), ord='fro') / fn_pr]
-        df.loc[k + 1] = [t, 'all_svt', np.linalg.norm(X - A, ord='fro') / fn_pr]
+        df.loc[k] = [t, 'known_svt', np.linalg.norm(mask * (X - M), ord='fro') / fn_pr]
+        df.loc[k + 1] = [t, 'all_svt', np.linalg.norm(X - M, ord='fro') / fn_pr]
 
-        if np.linalg.norm(mask * (A - X), ord='fro') / fn_pr < epsilon:
+        if np.linalg.norm(mask * (M - X), ord='fro') / fn_pr < epsilon:
             break
         """
-        if np.linalg.norm(mask * (X - A), ord='fro') < epsilon:
+        if np.linalg.norm(mask * (X - M), ord='fro') < epsilon:
             break
         """
-    return X, t
+    return X, t, t
 
 
 def svt_wsinfo(M, A, B, mask, tao, delta=None, epsilon=1e-4, max_iterations=1000, r=None):
@@ -98,7 +98,7 @@ def svt_wsinfo(M, A, B, mask, tao, delta=None, epsilon=1e-4, max_iterations=1000
         if np.linalg.norm(mask * (A @ Z @ B.T - M), ord='fro') / fn_pr < epsilon:
             break
 
-    return A @ Z @ B.T, t
+    return A @ Z @ B.T, t, t
 
 
 def svp_wsinfo(M, A, B, mask, r=10, delta=None, epsilon=1e-4, max_iterations=1000, tao=None):
@@ -113,31 +113,59 @@ def svp_wsinfo(M, A, B, mask, r=10, delta=None, epsilon=1e-4, max_iterations=100
     def comp(Z):
         return A.T @ (mask * (A @ Z @ B.T)) @ B
 
+    def step_svp(delta):
+        Y = Z + (delta) * (M_0 - comp(Z))
+        U, E, V = np.linalg.svd(Y)
+
+        E = E[:r]
+        U = U[:, :r]
+        V = V[:r, :]
+        return np.linalg.multi_dot([U, np.diag(E), V])
+
     if delta is None:
-        delta = max(0.75 / density / 1.35, 1)
-    print("svp_delta: ", delta)
+        max_delta = max(0.75 / density, 1)
+        delta = max_delta
+    print("svp_max_delta: ", delta)
+    delta_step_add = 0.1
+    delta_step_div = 2
 
     M_0 = oper_adj(mask * M)
 
     fn_pr = np.linalg.norm(mask * M, ord='fro')
     Z = np.zeros_like(M_0)
     t = 0
-    for t in range(max_iterations):
-        Y = Z + delta * (M_0 - comp(Z))
-        U, E, V = np.linalg.svd(Y)
-
-        E = E[:r]
-        U = U[:, :r]
-        V = V[:r, :]
-        Z = np.linalg.multi_dot([U, np.diag(E), V])
+    rt = 0
+    last_error = np.inf
+    while t <= max_iterations:
+        rt += 1
+        # пытаемся увеличить шаг
+        Z_add = step_svp(delta + delta_step_add)
+        error_add = np.linalg.norm(mask * (A @ Z_add @ B.T - M), ord='fro') / fn_pr
+        if error_add < last_error:
+            delta += delta_step_add
+            Z = Z_add
+        else:
+            # не получилось, пробуем текущий шаг
+            Z_zero = step_svp(delta)
+            error_zero = np.linalg.norm(mask * (A @ Z_zero @ B.T - M), ord='fro') / fn_pr
+            if error_zero < last_error:
+                Z = Z_zero
+            else:
+                # всё плохо, уменьшаем шаг
+                delta = max(delta / delta_step_div, 1)
+                continue
 
         it = df.shape[0]
-        df.loc[it] = [t, 'known_svp_side', np.linalg.norm(mask * (A @ Z @ B.T - M), ord='fro') / fn_pr]
+        error = np.linalg.norm(mask * (A @ Z @ B.T - M), ord='fro') / fn_pr
+        df.loc[it] = [t, 'known_svp_side', error]
         df.loc[it + 1] = [t, 'all_svp_side', np.linalg.norm((A @ Z @ B.T - M), ord='fro') / fn_pr]
+        df.loc[it + 2] = [t, 'delta', delta]
+        t += 1
+        last_error = error
 
         if np.linalg.norm(mask * (A @ Z @ B.T - M), ord='fro') / fn_pr < epsilon:
             break
-    return A @ Z @ B.T, t
+    return A @ Z @ B.T, t, rt, delta
 
 
 def test_method(name, complition, M, mask, A=None, B=None, r=10, delta=None, tao=None, epsilon=1e-4, mi=1000):
@@ -145,12 +173,13 @@ def test_method(name, complition, M, mask, A=None, B=None, r=10, delta=None, tao
     print(name)
 
     start = time.time()
-    A_f, t_f = complition(M=M, A=A, B=B, mask=mask, epsilon=epsilon, tao=tao, r=r, max_iterations=mi)
+    A_f, t_f, rt_f, d_f = complition(M=M, A=A, B=B, mask=mask, epsilon=epsilon, tao=tao, r=r, max_iterations=mi)
     time_alg = time.time() - start
 
     print("time: ", time_alg)
-    print("iterations: ", t_f)
+    print("iterations: ", t_f, rt_f)
     print("time for it: ", time_alg / t_f)
+    print("final_delta", d_f)
 
     print("rank: ", np.linalg.matrix_rank(A_f))
     print("known error :", np.linalg.norm(mask * (A_f - M), ord='fro'))
@@ -178,17 +207,6 @@ m_real = mask.nonzero()[0].size
 
 density = m_real / n ** 2
 print("density: ", np.round(density, 3), m_real)
-"""
-print("SVP: ")
-start = time.time()
-A_svp, t_svp = svp_solve(A, mask, epsilon=1e-2, k=r)
-print("time: ", time.time() - start)
-print("ieration: ", t_svp)
-
-print(np.linalg.matrix_rank(A_svp))
-print(np.linalg.norm(mask * (A_svp - A), ord='fro'))
-print(np.linalg.norm((A_svp - A), ord='fro'))
-"""
 
 """
 U_s = ortho_group.rvs(n)[:, :r]
@@ -209,10 +227,11 @@ U_2 = U @ Q_1
 V_2 = Q_2 @ V
 
 
+
 #A_svt_side = test_method("svt_sinfo", svt_wsinfo, M=A, A=U_s, B=V_s.T, mask=mask, epsilon=1e-4, tao=1000, mi=100)
 
 A_svp_side = test_method("svp_sinfo", svp_wsinfo, M=A, A=U_2, B=V_2.T, mask=mask, epsilon=1e-4, r=r, mi=500)
-
+#A_svp = test_method("svp", svp_solve, M=A, mask=mask, epsilon=1e-4, r=r, mi=300)
 """
 
 U_c, E_c, V_c = np.linalg.svd(A_svt_side)
@@ -238,10 +257,9 @@ print(np.linalg.norm((A_svt - A), ord='fro'))
 
 # ax.set_ylim(ymin=df.error.min(), ymax=df.error.max())
 sns.lineplot(data=df, ax=ax, x='n_iter', y='error', hue='error_type')
-
 ax.set(yscale='log')
-plt.show()
 
+plt.show()
 """
 r_a = 51
 r_b = 211
@@ -249,6 +267,8 @@ A = np.random.sample((n, r_a))
 B = np.random.sample((n, r_b))
 Z = np.random.sample((r_a, r_b))
 X = np.random.sample((n, n))
-#print(np.trace((mask * (A @ Z @ B.T)).T @ X))
-#print(np.trace(Z.T @ (A.T @ (X * mask) @ B)))
+print(np.trace((mask * (A @ Z @ B.T)).T @ X))
+print(np.trace((B @ Z.T @ A.T) @ (X * mask)))
+print(np.trace(Z.T @ (A.T @ (X * mask) @ B)))
+print(np.linalg.norm((mask * X - X * mask)))
 """
